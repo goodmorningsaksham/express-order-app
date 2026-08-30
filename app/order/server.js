@@ -20,9 +20,9 @@ const retryAttemptsTotal = new client.Counter({
   labelNames: ['service', 'target']
 });
 
-const RETRIES_MAX = 2;
-const RETRY_TIMEOUT_MS = 1000;
-const RETRY_BACKOFF_MS = 500;
+const RETRIES_MAX = 8;
+const RETRY_TIMEOUT_MS = 500;
+const RETRY_BACKOFF_MS = 0;
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'order-service', retries_max: RETRIES_MAX });
