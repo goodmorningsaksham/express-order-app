@@ -400,7 +400,7 @@ class ExperimentSynthesizer:
                     if biz_routes:
                         found_route = biz_routes[0]
                         if "order" in found_route or "item" in found_route:
-                            found_payload: Dict[str, Any] = {"item_id": "item_123", "quantity": 1}
+                            found_payload: Dict[str, Any] = {"item_id": "item_123", "quantity": 1, "amount": 100.0}
                         elif "checkout" in found_route:
                             found_payload = {"order_id": "ord_123", "amount": 100.0, "currency": "USD"}
                         elif "reserve" in found_route:
@@ -412,7 +412,7 @@ class ExperimentSynthesizer:
                 # FALLBACK: Agent reasoning over arbitrary web framework source code
                 return self.resolve_entrypoint_route_via_agent(content_src)
 
-        return "/orders", {"item_id": "item_123", "quantity": 1}
+        return "/orders", {"item_id": "item_123", "quantity": 1, "amount": 100.0}
 
     def resolve_entrypoint_route_via_agent(self, content: str) -> Tuple[str, Dict[str, Any]]:
         """Uses LLM reasoning fallback to discover the main POST route and payload from source code.

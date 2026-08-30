@@ -1,4 +1,4 @@
-"""Primary LLM reasoning and coding agent implementation."""
+﻿"""Primary LLM reasoning and coding agent implementation."""
 import os
 import json
 from typing import Dict, Any
@@ -72,11 +72,28 @@ class ChangeProofAgent:
         except Exception:
             pass
 
-        # 4. Multi-Signal Hypothesis Formulation (one grounded hypothesis per detected signal)
+        # 4. Resolve changed file content for LLM-grounded hypothesis generation.
+        # Extract changed file path from diff and read its current content.
+        code_context = ""
+        changed_file_path = ""
+        for line in pr_diff.splitlines():
+            if line.startswith("+++ b/"):
+                changed_file_path = line[6:].strip()
+                break
+        if changed_file_path and os.path.exists(changed_file_path):
+            try:
+                with open(changed_file_path, "r", encoding="utf-8") as f:
+                    code_context = f.read()
+            except Exception:
+                pass
+
+        # 5. Multi-Signal Hypothesis Formulation (one LLM-grounded hypothesis per detected signal)
         hypotheses = generate_candidate_hypotheses(
             signals=risk_scorecard.get("signals", []),
             proxy_name=proxy_name,
             calibrated_latency_ms=calibrated_latency_ms,
+            diff_text=pr_diff,
+            code_context=code_context,
         )
 
         # Attach the synthesized spec to the primary hypothesis

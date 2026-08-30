@@ -1,4 +1,4 @@
-"""Proof certificate rendering module."""
+﻿"""Proof certificate rendering module."""
 from jinja2 import Template
 from typing import Dict, Any
 
@@ -6,11 +6,11 @@ DEFAULT_MD_TEMPLATE = """# CHANGE PROOF CERTIFICATE
 Generated: {{ timestamp }} | Experiment: {{ experiment_id }} | Commit: {{ git_commit }}
 
 {% if verification_status == "PASS" %}
-> **STATUS**: [PASS] PROVEN & VERIFIED SAFE — Patch passed deterministic criteria.
+> **STATUS**: [PASS] PROVEN & VERIFIED SAFE â€” Patch passed deterministic criteria.
 {% elif verification_status == "INCONCLUSIVE" %}
 > **STATUS**: [INCONCLUSIVE] Insufficient runtime evidence to prove safety. NOT CERTIFIED FOR PRODUCTION.
 {% else %}
-> **STATUS**: [FAIL] VERIFICATION FAILED — Remediation patch failed deterministic assertions.
+> **STATUS**: [FAIL] VERIFICATION FAILED â€” Remediation patch failed deterministic assertions.
 {% endif %}
 
 ## Evaluation Summary
@@ -56,7 +56,7 @@ Generated: {{ timestamp }} | Experiment: {{ experiment_id }} | Commit: {{ git_co
 
 ## Reproducibility & Artifacts
 - **Reproduction Capsule**: `{{ capsule_path }}`
-- **Replay Command**: `python changeproof/replay.py {{ capsule_path }}`
+- **Replay Command**: `python -m changeproof.replay {{ capsule_path }}`
 
 ## Human Engineering Decision
 [ ] APPROVED FOR DEPLOYMENT   [ ] REJECTED   [ ] ESCALATE FOR REVIEW
