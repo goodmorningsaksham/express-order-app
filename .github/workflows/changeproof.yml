@@ -25,7 +25,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-# cache: "pip"
+          cache: "pip"
 
       - name: Install Dependencies
         run: |
@@ -74,7 +74,7 @@ jobs:
               let certContent = fs.readFileSync(path, 'utf8');
               
               // Append artifact and replay instruction footer
-              const footer = `\n\n---\n### 📦 Artifact Reference\n- **Capsule Artifact**: Download \`changeproof-reproduction-capsule\` from the Workflow Run Summary.\n- **Replay Verification**:\n  \`\`\`bash\n  python changeproof/replay.py capsules/case-01.zip\n  \`\`\``;
+              const footer = `\n\n---\n### ðŸ“¦ Artifact Reference\n- **Capsule Artifact**: Download \`changeproof-reproduction-capsule\` from the Workflow Run Summary.\n- **Replay Verification**:\n  \`\`\`bash\n  python changeproof/replay.py capsules/case-01.zip\n  \`\`\``;
               
               const body = certContent + footer;
               const issueNumber = context.issue.number || 1;
@@ -86,4 +86,5 @@ jobs:
                 body: body
               });
             }
+
 

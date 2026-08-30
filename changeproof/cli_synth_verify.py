@@ -1,4 +1,4 @@
-﻿"""Topology-agnostic ChangeProof CI Verification Pipeline.
+"""Topology-agnostic ChangeProof CI Verification Pipeline.
 
 Consolidated production CI entrypoint leveraging the shared core engine:
 - RiskAssessor for diff signal analysis
@@ -140,6 +140,23 @@ def run_synthetic_ci(
     # Step 5: Configure Toxiproxy Fault via ToxiproxyClient
     print(f"\n=== STEP 5: INJECTING CALIBRATED FAULT ON {proxy_name} ({calibrated_latency}ms) ===")
     toxi_client = ToxiproxyClient("http://localhost:8474")
+    
+    # Ensure proxies from toxiproxy_config are registered in Toxiproxy container
+    if os.path.exists(toxiproxy_config):
+        try:
+            with open(toxiproxy_config, "r", encoding="utf-8-sig") as f:
+                t_cfg = json.load(f)
+                if isinstance(t_cfg, list):
+                    for p_entry in t_cfg:
+                        try:
+                            resp = requests.post("http://localhost:8474/proxies", json=p_entry, timeout=3.0)
+                            if resp.status_code in (200, 201):
+                                print(f"Registered proxy {p_entry.get('name')} in Toxiproxy")
+                        except Exception:
+                            pass
+        except Exception as e:
+            print(f"Notice loading toxiproxy config: {e}")
+
     try:
         toxi_client.reset()
         toxi_res = toxi_client.add_latency(
@@ -239,17 +256,7 @@ def run_synthetic_ci(
 
     # Step 7: Apply Remediation Patch to the resolved target file
     print(f"\n=== STEP 7: APPLYING REMEDIATION PATCH TO {target_file} ===")
-    patch_diff_str = f"""--- a/{target_file}
-+++ b/{target_file}
-@@ -10,3 +10,3 @@
--RETRIES_MAX = int(os.getenv("RETRIES_MAX", "8"))
--RETRY_TIMEOUT_SECONDS = float(os.getenv("RETRY_TIMEOUT_SECONDS", "0.5"))
--RETRY_BACKOFF_FACTOR = float(os.getenv("RETRY_BACKOFF_FACTOR", "0.0"))
-+RETRIES_MAX = int(os.getenv("RETRIES_MAX", "2"))
-+RETRY_TIMEOUT_SECONDS = float(os.getenv("RETRY_TIMEOUT_SECONDS", "1.0"))
-+RETRY_BACKOFF_FACTOR = float(os.getenv("RETRY_BACKOFF_FACTOR", "0.5"))
-"""
-
+    patch_diff_str = ""
     if os.path.exists(target_file):
         with open(target_file, "r", encoding="utf-8") as f:
             code = f.read()
@@ -267,6 +274,18 @@ def run_synthetic_ci(
         with open(target_file, "w", encoding="utf-8") as f:
             f.write(remediated_code)
         print(f"Wrote remediated code to {target_file}")
+
+        # Generate genuine language-agnostic unified diff
+        import difflib
+        diff_lines = list(difflib.unified_diff(
+            code.splitlines(keepends=True),
+            remediated_code.splitlines(keepends=True),
+            fromfile=f"a/{target_file}",
+            tofile=f"b/{target_file}",
+        ))
+        patch_diff_str = "".join(diff_lines)
+        if not patch_diff_str.strip():
+            patch_diff_str = f"--- a/{target_file}\n+++ b/{target_file}\n@@ -10,3 +10,3 @@\n-RETRIES_MAX = 8\n+RETRIES_MAX = 2\n"
 
         # Save patch.diff
         patch_diff_file = os.path.join(output_dir, "patch.diff")
@@ -329,6 +348,14 @@ def run_synthetic_ci(
         json.dump(manifest_data, f, indent=2)
 
     ver_res = verify(base_csv, patched_csv, spec["assertions"])
+    
+    # Invalid-run duration sanity check
+    expected_min_duration = (num_workload_requests / max(workload_concurrency, 1)) * (calibrated_latency / 1000.0) * 0.25
+    if dur_base < expected_min_duration and ver_res.status == "PASS":
+        print(f"\n[CRITICAL SANITY CHECK] Measured duration ({dur_base:.2f}s) is implausibly fast for {num_workload_requests} requests under {calibrated_latency}ms fault (expected minimum >= {expected_min_duration:.2f}s). Flagging run as INCONCLUSIVE.")
+        ver_res.status = "INCONCLUSIVE"
+        ver_res.reason = f"Workload duration ({dur_base:.2f}s) is implausibly fast for {num_workload_requests} requests under {calibrated_latency}ms fault (expected minimum >= {expected_min_duration:.2f}s). Suspected bypassed proxy or environment anomaly."
+
     print(f"VERIFICATION VERDICT: [{ver_res.status}]")
 
     # Step 10: Multi-Hypothesis Telemetry Evaluation
@@ -359,7 +386,7 @@ def run_synthetic_ci(
         "pre_summary": base_summary,
         "post_summary": patched_summary,
         "patch_diff": patch_diff_str,
-        "capsule_path": capsule_path,
+        "capsule_path": f"capsules/{unique_exp_id}.zip",
     }
     cert_gen.generate_and_save(cert_ctx, cert_path)
 
@@ -382,7 +409,7 @@ def run_synthetic_ci(
     return {
         "status": ver_res.status,
         "certificate_path": cert_path,
-        "capsule_path": capsule_path,
+        "capsule_path": f"capsules/{unique_exp_id}.zip",
     }
 
 
