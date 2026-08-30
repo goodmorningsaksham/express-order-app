@@ -8,9 +8,9 @@ app.use(express.json());
 const PORT = process.env.PORT || 8000;
 const PAYMENT_URL = process.env.PAYMENT_SERVICE_URL || 'http://toxiproxy:18003/authorize';
 
-const RETRIES_MAX = 8;
-const RETRY_TIMEOUT_MS = 500;
-const RETRY_BACKOFF_MS = 0;
+const RETRIES_MAX = 2;
+const RETRY_TIMEOUT_MS = 1000;
+const RETRY_BACKOFF_MS = 500;
 
 // Prometheus metrics
 const register = new client.Registry();
@@ -83,4 +83,5 @@ app.post('/api/v1/orders/create', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Express Order Service running on port ${PORT}`);
 });
+
 
