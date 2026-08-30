@@ -1,4 +1,4 @@
-﻿"""Topology-agnostic ChangeProof CI Verification Pipeline.
+"""Topology-agnostic ChangeProof CI Verification Pipeline.
 
 Consolidated production CI entrypoint leveraging the shared core engine:
 - RiskAssessor for diff signal analysis
@@ -140,6 +140,23 @@ def run_synthetic_ci(
     # Step 5: Configure Toxiproxy Fault via ToxiproxyClient
     print(f"\n=== STEP 5: INJECTING CALIBRATED FAULT ON {proxy_name} ({calibrated_latency}ms) ===")
     toxi_client = ToxiproxyClient("http://localhost:8474")
+    
+    # Ensure proxies from toxiproxy_config are registered in Toxiproxy container
+    if os.path.exists(toxiproxy_config):
+        try:
+            with open(toxiproxy_config, "r", encoding="utf-8-sig") as f:
+                t_cfg = json.load(f)
+                if isinstance(t_cfg, list):
+                    for p_entry in t_cfg:
+                        try:
+                            resp = requests.post("http://localhost:8474/proxies", json=p_entry, timeout=3.0)
+                            if resp.status_code in (200, 201):
+                                print(f"Registered proxy {p_entry.get('name')} in Toxiproxy")
+                        except Exception:
+                            pass
+        except Exception as e:
+            print(f"Notice loading toxiproxy config: {e}")
+
     try:
         toxi_client.reset()
         toxi_res = toxi_client.add_latency(
