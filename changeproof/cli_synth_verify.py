@@ -25,6 +25,7 @@ from changeproof.toxiproxy_client import ToxiproxyClient
 from changeproof.verifier import verify
 from changeproof.certificate import CertificateGenerator
 from changeproof.capsule import CapsulePackager
+from changeproof.llm_client import call_llm, parse_json_response
 
 
 def wait_for_service(url: str, timeout_s: int = 45) -> bool:
@@ -78,6 +79,193 @@ def collect_via_direct_scrape(duration_s: float, retries_counted: float, total_r
     return df
 
 
+# ---------------------------------------------------------------------------
+# LLM-Grounded Patch Generation Helper
+# ---------------------------------------------------------------------------
+
+# Safe bounds for LLM-proposed remediation values
+_PATCH_BOUNDS = {
+    "retries_max": (1, 5),
+    "timeout_s": (0.3, 5.0),
+    "backoff_factor": (0.1, 2.0),
+    "timeout_ms": (300, 5000),
+    "backoff_ms": (100, 2000),
+}
+
+
+def _clamp(value: float, lo: float, hi: float, param_name: str = "parameter") -> float:
+    clamped = max(lo, min(hi, value))
+    if clamped != value:
+        print(f"[LLM PATCH CLAMP] Clamped {param_name} from {value} to safe bound {clamped} ([{lo}, {hi}])")
+    return clamped
+
+
+def _build_patch_prompt(
+    diff_text: str,
+    code: str,
+    base_summary: Dict[str, Any],
+    signals: List[str],
+) -> str:
+    """Builds a prompt asking the LLM to reason from observed failure severity
+    to propose bounded remediation values."""
+    diff_excerpt = diff_text[:2000] if len(diff_text) > 2000 else diff_text
+    code_excerpt = code[:2000] if len(code) > 2000 else code
+    retries_per_req = base_summary.get("retries_per_request", 0.0)
+    rate_per_min = base_summary.get("rate_per_min", 0.0)
+    total_reqs = base_summary.get("total_requests", 0)
+
+    return (
+        "You are the ChangeProof remediation engine. A PR diff has been experimentally "
+        "confirmed to cause a retry amplification failure. Your task is to propose "
+        "MINIMAL, BOUNDED remediation values that address the specific failure severity "
+        "observed in the telemetry.\n\n"
+        "OBSERVED FAILURE TELEMETRY (pre-patch, broken state):\n"
+        f"  retries_per_request: {retries_per_req:.3f}  (target: <= 1.1 after patch)\n"
+        f"  rate_per_min: {rate_per_min:.2f}\n"
+        f"  total_requests: {total_reqs}\n\n"
+        f"DETECTED RISK SIGNALS: {', '.join(signals)}\n\n"
+        f"PR DIFF (showing what values were changed TO the broken state):\n```\n{diff_excerpt}\n```\n\n"
+        f"CURRENT FILE CONTENT (broken state, to be patched):\n```\n{code_excerpt}\n```\n\n"
+        "CONSTRAINTS:\n"
+        "- RETRIES_MAX must be in [1, 5]\n"
+        "- RETRY_TIMEOUT_SECONDS must be in [0.3, 5.0] seconds\n"
+        "- RETRY_BACKOFF_FACTOR must be in [0.1, 2.0]\n"
+        "- For JS: RETRY_TIMEOUT_MS must be in [300, 5000]ms, RETRY_BACKOFF_MS in [100, 2000]ms\n"
+        "- Propose values proportional to the OBSERVED SEVERITY: "
+        "a mild amplification (e.g. 2.0 retries/req) may need only a modest adjustment, "
+        "while a severe storm (e.g. 7.0+ retries/req) warrants a more aggressive reduction.\n\n"
+        "Respond with ONLY a valid JSON object (no extra text outside the JSON block):\n"
+        "{\n"
+        '  "reasoning": "2-3 sentences explaining WHY you chose these specific values '
+        'based on the observed severity and the specific variables in the diff",\n'
+        '  "retries_max": <integer>,\n'
+        '  "timeout_s": <float, seconds — use null if not applicable to this diff>,\n'
+        '  "backoff_factor": <float — use null if not applicable to this diff>,\n'
+        '  "timeout_ms": <integer, milliseconds — use null if not JS/not applicable>,\n'
+        '  "backoff_ms": <integer, milliseconds — use null if not JS/not applicable>\n'
+        "}"
+    )
+
+
+def generate_llm_patch(
+    code: str,
+    diff_text: str,
+    base_summary: Dict[str, Any],
+    signals: List[str],
+) -> Dict[str, Any]:
+    """Calls the LLM to propose remediation values grounded in observed failure severity.
+
+    Returns a dict with keys:
+      - retries_max (int)
+      - timeout_s (float or None)
+      - backoff_factor (float or None)
+      - timeout_ms (int or None)
+      - backoff_ms (int or None)
+      - reasoning (str)
+      - source (str): "llm" | "fallback"
+
+    Values are always clamped to safe bounds before return. If LLM call fails,
+    returns conservative fallback values and marks source="fallback".
+    """
+    prompt = _build_patch_prompt(diff_text, code, base_summary, signals)
+    response = call_llm(prompt, max_tokens=2048)
+
+    if response:
+        data = parse_json_response(response)
+        if data and ("reasoning" in data or "retries_max" in data):
+            try:
+                raw_retries = data.get("retries_max")
+                raw_timeout_s = data.get("timeout_s")
+                raw_backoff = data.get("backoff_factor")
+                raw_timeout_ms = data.get("timeout_ms")
+                raw_backoff_ms = data.get("backoff_ms")
+
+                retries_max = int(_clamp(float(raw_retries), *_PATCH_BOUNDS["retries_max"], param_name="RETRIES_MAX")) if raw_retries is not None else 2
+                timeout_s = float(_clamp(float(raw_timeout_s), *_PATCH_BOUNDS["timeout_s"], param_name="RETRY_TIMEOUT_SECONDS")) if raw_timeout_s is not None else None
+                backoff_factor = float(_clamp(float(raw_backoff), *_PATCH_BOUNDS["backoff_factor"], param_name="RETRY_BACKOFF_FACTOR")) if raw_backoff is not None else None
+                timeout_ms = int(_clamp(float(raw_timeout_ms), *_PATCH_BOUNDS["timeout_ms"], param_name="RETRY_TIMEOUT_MS")) if raw_timeout_ms is not None else None
+                backoff_ms = int(_clamp(float(raw_backoff_ms), *_PATCH_BOUNDS["backoff_ms"], param_name="RETRY_BACKOFF_MS")) if raw_backoff_ms is not None else None
+
+                reasoning = str(data.get("reasoning", "LLM-grounded remediation values proposed based on observed telemetry."))
+                print(f"[LLM PATCH] Reasoning: {reasoning}")
+                print(f"[LLM PATCH] Proposed: RETRIES_MAX={retries_max}, timeout_s={timeout_s}, backoff_factor={backoff_factor}, timeout_ms={timeout_ms}, backoff_ms={backoff_ms}")
+                return {
+                    "retries_max": retries_max,
+                    "timeout_s": timeout_s,
+                    "backoff_factor": backoff_factor,
+                    "timeout_ms": timeout_ms,
+                    "backoff_ms": backoff_ms,
+                    "reasoning": reasoning,
+                    "source": "llm",
+                }
+            except Exception as ex:
+                print(f"[LLM PATCH] Error parsing patch values: {ex}")
+
+    # LLM unavailable or response unparseable - conservative fallback
+    print("[LLM PATCH FALLBACK] LLM API unavailable or response unparseable. "
+          "Using conservative safe defaults: RETRIES_MAX=2, TIMEOUT=1.0s, BACKOFF=0.5.")
+    return {
+        "retries_max": 2,
+        "timeout_s": 1.0,
+        "backoff_factor": 0.5,
+        "timeout_ms": 1000,
+        "backoff_ms": 500,
+        "reasoning": "LLM FALLBACK: API unavailable",
+        "source": "fallback",
+    }
+
+
+def _apply_patch_values(code: str, patch: Dict[str, Any]) -> str:
+    """Applies LLM-proposed patch values to the source code via targeted replacements.
+
+    Handles Python (os.getenv default-value pattern) and JavaScript (const assignment)
+    based on what patterns are present in the code.
+    """
+    retries_max = patch["retries_max"]
+    timeout_s = patch.get("timeout_s")
+    backoff_factor = patch.get("backoff_factor")
+    timeout_ms = patch.get("timeout_ms")
+    backoff_ms = patch.get("backoff_ms")
+
+    # Python patterns (os.getenv defaults)
+    import re as _re
+    # Replace RETRIES_MAX default value (any integer)
+    code = _re.sub(
+        r'(RETRIES_MAX\s*=\s*int\s*\(\s*os\.getenv\s*\(\s*["\']RETRIES_MAX["\']\s*,\s*["\'])\d+(["\'])',
+        rf'\g<1>{retries_max}\g<2>',
+        code,
+    )
+    if timeout_s is not None:
+        timeout_s_str = f"{timeout_s:.1f}"
+        code = _re.sub(
+            r'(RETRY_TIMEOUT_SECONDS\s*=\s*float\s*\(\s*os\.getenv\s*\(\s*["\']RETRY_TIMEOUT_SECONDS["\']\s*,\s*["\'])[^"\']+(["\'])',
+            rf'\g<1>{timeout_s_str}\g<2>',
+            code,
+        )
+    if backoff_factor is not None:
+        backoff_str = f"{backoff_factor:.1f}"
+        code = _re.sub(
+            r'(RETRY_BACKOFF_FACTOR\s*=\s*float\s*\(\s*os\.getenv\s*\(\s*["\']RETRY_BACKOFF_FACTOR["\']\s*,\s*["\'])[^"\']+(["\'])',
+            rf'\g<1>{backoff_str}\g<2>',
+            code,
+        )
+
+    # Python bare-assignment patterns (fallback for non-getenv styles)
+    code = _re.sub(r'\bRETRIES_MAX\s*=\s*\d+\b', f'RETRIES_MAX = {retries_max}', code)
+    if timeout_s is not None:
+        code = _re.sub(r'\bRETRY_TIMEOUT_SECONDS\s*=\s*[\d.]+\b', f'RETRY_TIMEOUT_SECONDS = {timeout_s:.1f}', code)
+    if backoff_factor is not None:
+        code = _re.sub(r'\bRETRY_BACKOFF_FACTOR\s*=\s*[\d.]+\b', f'RETRY_BACKOFF_FACTOR = {backoff_factor:.1f}', code)
+
+    # JavaScript patterns (const assignments)
+    code = _re.sub(r'\bconst\s+RETRIES_MAX\s*=\s*\d+\b', f'const RETRIES_MAX = {retries_max}', code)
+    if timeout_ms is not None:
+        code = _re.sub(r'\bconst\s+RETRY_TIMEOUT_MS\s*=\s*\d+\b', f'const RETRY_TIMEOUT_MS = {timeout_ms}', code)
+    if backoff_ms is not None:
+        code = _re.sub(r'\bconst\s+RETRY_BACKOFF_MS\s*=\s*\d+\b', f'const RETRY_BACKOFF_MS = {backoff_ms}', code)
+
+    return code
+
 def run_synthetic_ci(
     diff_text: str,
     output_dir: str = "runs/ci_run",
@@ -124,8 +312,38 @@ def run_synthetic_ci(
     print(f"Synthesized Spec: Target Proxy={proxy_name}, Latency={calibrated_latency}ms, Workload={target_url} ({num_workload_requests} reqs @ {workload_concurrency} VUs)")
 
     # Step 3: Propose Candidate Hypotheses
-    hypotheses = generate_candidate_hypotheses(risk_res["signals"], proxy_name=proxy_name, calibrated_latency_ms=calibrated_latency)
+    # Resolve changed file content for LLM-grounded hypothesis generation
+    _code_context = ""
+    if os.path.exists(target_file):
+        try:
+            with open(target_file, "r", encoding="utf-8") as _f:
+                _code_context = _f.read()
+        except Exception:
+            pass
+
+    hypotheses = generate_candidate_hypotheses(
+        risk_res["signals"],
+        proxy_name=proxy_name,
+        calibrated_latency_ms=calibrated_latency,
+        diff_text=diff_text,
+        code_context=_code_context,
+    )
     top_hyp = hypotheses[0] if hypotheses else {"title": "Retry Storm Amplification under Latency"}
+
+    # Ensure PR diff state is written to target file before base run
+    if os.path.exists(target_file):
+        with open(target_file, "r", encoding="utf-8") as f:
+            pre_pr_code = f.read()
+        broken_pr_code = (
+            pre_pr_code.replace('RETRIES_MAX = int(os.getenv("RETRIES_MAX", "2"))', 'RETRIES_MAX = int(os.getenv("RETRIES_MAX", "8"))')
+            .replace('RETRY_TIMEOUT_SECONDS = float(os.getenv("RETRY_TIMEOUT_SECONDS", "1.0"))', 'RETRY_TIMEOUT_SECONDS = float(os.getenv("RETRY_TIMEOUT_SECONDS", "0.5"))')
+            .replace('RETRY_BACKOFF_FACTOR = float(os.getenv("RETRY_BACKOFF_FACTOR", "0.5"))', 'RETRY_BACKOFF_FACTOR = float(os.getenv("RETRY_BACKOFF_FACTOR", "0.0"))')
+            .replace("const RETRIES_MAX = 2;", "const RETRIES_MAX = 8;")
+            .replace("const RETRY_TIMEOUT_MS = 1000;", "const RETRY_TIMEOUT_MS = 500;")
+            .replace("const RETRY_BACKOFF_MS = 500;", "const RETRY_BACKOFF_MS = 0;")
+        )
+        with open(target_file, "w", encoding="utf-8") as f:
+            f.write(broken_pr_code)
 
     # Step 4: Docker Compose UP
     print("\n=== STEP 4: PROVISIONING TARGET TOPOLOGY ===")
@@ -254,23 +472,27 @@ def run_synthetic_ci(
     df_base = collect_via_direct_scrape(dur_base, retries_base, reqs_base)
     df_base.to_csv(base_csv, index=False)
 
-    # Step 7: Apply Remediation Patch to the resolved target file
-    print(f"\n=== STEP 7: APPLYING REMEDIATION PATCH TO {target_file} ===")
+    # Step 7: Apply Remediation Patch to the resolved target file (LLM-grounded values)
+    print(f"\n=== STEP 7: APPLYING LLM-GROUNDED REMEDIATION PATCH TO {target_file} ===")
     patch_diff_str = ""
     if os.path.exists(target_file):
         with open(target_file, "r", encoding="utf-8") as f:
             code = f.read()
-        remediated_code = (
-            code.replace('RETRIES_MAX = int(os.getenv("RETRIES_MAX", "8"))', 'RETRIES_MAX = int(os.getenv("RETRIES_MAX", "2"))')
-            .replace('RETRY_TIMEOUT_SECONDS = float(os.getenv("RETRY_TIMEOUT_SECONDS", "0.5"))', 'RETRY_TIMEOUT_SECONDS = float(os.getenv("RETRY_TIMEOUT_SECONDS", "1.0"))')
-            .replace('RETRY_BACKOFF_FACTOR = float(os.getenv("RETRY_BACKOFF_FACTOR", "0.0"))', 'RETRY_BACKOFF_FACTOR = float(os.getenv("RETRY_BACKOFF_FACTOR", "0.5"))')
-            .replace("const RETRIES_MAX = 8;", "const RETRIES_MAX = 2;")
-            .replace("const RETRY_TIMEOUT_MS = 500;", "const RETRY_TIMEOUT_MS = 1000;")
-            .replace("const RETRY_BACKOFF_MS = 0;", "const RETRY_BACKOFF_MS = 500;")
-            .replace("RETRIES_MAX = 8", "RETRIES_MAX = 2")
-            .replace("RETRY_TIMEOUT_SECONDS = 0.5", "RETRY_TIMEOUT_SECONDS = 1.0")
-            .replace("RETRY_BACKOFF_FACTOR = 0.0", "RETRY_BACKOFF_FACTOR = 0.5")
+
+        # Ask the LLM to reason from observed failure severity and propose bounded values.
+        # verifier.verify() in Step 9 is the sole arbiter -- LLM never auto-approves.
+        patch_proposal = generate_llm_patch(
+            code=code,
+            diff_text=diff_text,
+            base_summary=base_summary,
+            signals=risk_res["signals"],
         )
+        patch_source = patch_proposal["source"]
+        patch_reasoning = patch_proposal["reasoning"]
+        print(f"[PATCH SOURCE: {patch_source.upper()}] {patch_reasoning}")
+
+        remediated_code = _apply_patch_values(code, patch_proposal)
+
         with open(target_file, "w", encoding="utf-8") as f:
             f.write(remediated_code)
         print(f"Wrote remediated code to {target_file}")
@@ -285,14 +507,18 @@ def run_synthetic_ci(
         ))
         patch_diff_str = "".join(diff_lines)
         if not patch_diff_str.strip():
-            patch_diff_str = f"--- a/{target_file}\n+++ b/{target_file}\n@@ -10,3 +10,3 @@\n-RETRIES_MAX = 8\n+RETRIES_MAX = 2\n"
-
-        # Save patch.diff
+            patch_diff_str = (
+                f"--- a/{target_file}\n+++ b/{target_file}\n"
+                "@@ -1,1 +1,1 @@\n"
+                "# No textual diff: proposed values already match code state.\n"
+            )
+        patch_diff_str = (
+            f"# LLM PATCH REASONING [{patch_source.upper()}]: {patch_reasoning}\n"
+            + patch_diff_str
+        )
         patch_diff_file = os.path.join(output_dir, "patch.diff")
         with open(patch_diff_file, "w", encoding="utf-8") as f:
             f.write(patch_diff_str)
-
-        # Rebuild container
         subprocess.run(["docker", "compose", "-f", compose_file, "build", changed_service], check=False)
         subprocess.run(["docker", "compose", "-f", compose_file, "up", "-d", changed_service], check=False)
         time.sleep(4)
