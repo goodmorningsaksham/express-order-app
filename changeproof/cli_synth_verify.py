@@ -512,10 +512,7 @@ def run_synthetic_ci(
                 "@@ -1,1 +1,1 @@\n"
                 "# No textual diff: proposed values already match code state.\n"
             )
-        patch_diff_str = (
-            f"# LLM PATCH REASONING [{patch_source.upper()}]: {patch_reasoning}\n"
-            + patch_diff_str
-        )
+
         patch_diff_file = os.path.join(output_dir, "patch.diff")
         with open(patch_diff_file, "w", encoding="utf-8") as f:
             f.write(patch_diff_str)
@@ -612,6 +609,8 @@ def run_synthetic_ci(
         "pre_summary": base_summary,
         "post_summary": patched_summary,
         "patch_diff": patch_diff_str,
+        "patch_reasoning": patch_reasoning,
+        "patch_source": patch_source,
         "capsule_path": f"capsules/{unique_exp_id}.zip",
     }
     cert_gen.generate_and_save(cert_ctx, cert_path)
