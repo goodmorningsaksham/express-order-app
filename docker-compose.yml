@@ -1,0 +1,46 @@
+﻿version: '3.8'
+
+networks:
+  express-net:
+    driver: bridge
+
+services:
+  order-service:
+    build:
+      context: ./app/order
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - PAYMENT_SERVICE_URL=http://toxiproxy:18003/authorize
+    networks:
+      - express-net
+    depends_on:
+      - toxiproxy
+
+  payment-service:
+    build:
+      context: ./app/payment
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    networks:
+      - express-net
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    ports:
+      - "8474:8474"
+      - "18003:18003"
+    networks:
+      - express-net
+    depends_on:
+      - payment-service
+
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    ports:
+      - "9090:9090"
+    networks:
+      - express-net

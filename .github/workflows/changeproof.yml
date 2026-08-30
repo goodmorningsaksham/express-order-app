@@ -1,0 +1,88 @@
+﻿name: ChangeProof Reliability Gate
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  changeproof:
+    name: ChangeProof Verification
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi==0.110.0 uvicorn==0.28.0 httpx==0.27.0 requests==2.31.0 tenacity==8.2.3 \
+                      prometheus-client==0.20.0 pydantic==2.6.4 pytest==8.1.1 \
+                      pyyaml==6.0.1 jinja2==3.1.3 pandas==2.2.1
+
+      - name: Extract PR Diff
+        id: extract_diff
+        run: |
+          git fetch origin main
+          git diff origin/main HEAD > pr.diff
+          echo "=== EXTRACTED DIFF ==="
+          cat pr.diff
+          echo "======================"
+          echo "diff_size=$(wc -l < pr.diff)" >> $GITHUB_OUTPUT
+
+      - name: Run ChangeProof CI Pipeline
+        id: changeproof_pipeline
+        run: |
+          python -m changeproof.cli_synth_verify \
+            --diff pr.diff \
+            --commit "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --output-dir "runs/ci_run"
+
+      - name: Upload Reproduction Capsule
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: changeproof-reproduction-capsule
+          path: capsules/*.zip
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Post Proof Certificate to PR Comment
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = 'runs/ci_run/proof_certificate.md';
+            
+            if (fs.existsSync(path)) {
+              let certContent = fs.readFileSync(path, 'utf8');
+              
+              // Append artifact and replay instruction footer
+              const footer = `\n\n---\n### 📦 Artifact Reference\n- **Capsule Artifact**: Download \`changeproof-reproduction-capsule\` from the Workflow Run Summary.\n- **Replay Verification**:\n  \`\`\`bash\n  python changeproof/replay.py capsules/case-01.zip\n  \`\`\``;
+              
+              const body = certContent + footer;
+              const issueNumber = context.issue.number || 1;
+              
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: body
+              });
+            }

@@ -1,0 +1,11 @@
+﻿{
+  "name": "express-order-service",
+  "version": "1.0.0",
+  "description": "Express Order Service target with Prometheus metrics",
+  "main": "server.js",
+  "dependencies": {
+    "express": "^4.19.2",
+    "prom-client": "^15.1.0",
+    "axios": "^1.6.8"
+  }
+}

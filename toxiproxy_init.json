@@ -1,0 +1,8 @@
+﻿[
+  {
+    "name": "express-payment-proxy",
+    "listen": "0.0.0.0:18003",
+    "upstream": "payment-service:8002",
+    "enabled": true
+  }
+]
