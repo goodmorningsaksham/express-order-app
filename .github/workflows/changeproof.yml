@@ -69,16 +69,21 @@ jobs:
           script: |
             const fs = require('fs');
             const path = 'runs/ci_run/proof_certificate.md';
-            
             if (fs.existsSync(path)) {
               let certContent = fs.readFileSync(path, 'utf8');
-              
-              // Append artifact and replay instruction footer
-              const footer = `\n\n---\n### ðŸ“¦ Artifact Reference\n- **Capsule Artifact**: Download \`changeproof-reproduction-capsule\` from the Workflow Run Summary.\n- **Replay Verification**:\n  \`\`\`bash\n  python changeproof/replay.py capsules/case-01.zip\n  \`\`\``;
-              
+              let capsuleName = 'case-01.zip';
+              const manifestPath = 'runs/ci_run/manifest.json';
+              if (fs.existsSync(manifestPath)) {
+                try {
+                  const mData = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+                  if (mData.experiment_id) {
+                    capsuleName = `${mData.experiment_id}.zip`;
+                  }
+                } catch (e) {}
+              }
+              const footer = `\n\n---\n### 📦 Artifact Reference\n- **Capsule Artifact**: Download \`changeproof-reproduction-capsule\` from the Workflow Run Summary.\n- **Replay Verification**:\n  \`\`\`bash\n  python changeproof/replay.py capsules/${capsuleName}\n  \`\`\``;
               const body = certContent + footer;
               const issueNumber = context.issue.number || 1;
-              
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -86,5 +91,3 @@ jobs:
                 body: body
               });
             }
-
-
