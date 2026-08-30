@@ -1,89 +1,62 @@
 ﻿const express = require('express');
-const client = require('prom-client');
 const axios = require('axios');
+const client = require('prom-client');
 
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 8000;
-const PAYMENT_URL = process.env.PAYMENT_SERVICE_URL || 'http://toxiproxy:18003/authorize';
+const collectDefaultMetrics = client.collectDefaultMetrics;
+collectDefaultMetrics();
 
-const RETRIES_MAX = 8;
-const RETRY_TIMEOUT_MS = 500;
-const RETRY_BACKOFF_MS = 0;
-
-// Prometheus metrics
-const register = new client.Registry();
-client.collectDefaultMetrics({ register });
-
-const retryCounter = new client.Counter({
-  name: 'retry_count_total',
-  help: 'Total retry attempts across service boundaries',
-  labelNames: ['service', 'target'],
-  registers: [register],
+const httpRequestsTotal = new client.Counter({
+  name: 'http_requests_total',
+  help: 'Total HTTP requests',
+  labelNames: ['method', 'route', 'status_code']
 });
 
-const requestCounter = new client.Counter({
-  name: 'checkout_requests_total',
-  help: 'Total incoming checkout requests',
-  labelNames: ['service', 'status'],
-  registers: [register],
+const retryAttemptsTotal = new client.Counter({
+  name: 'retry_attempts_total',
+  help: 'Total retry attempts',
+  labelNames: ['service', 'target']
 });
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function callDownstreamWithRetry(orderData) {
-  let attempt = 0;
-  while (attempt < RETRIES_MAX) {
-    attempt++;
-    if (attempt > 1) {
-      retryCounter.labels('express-order', 'payment').inc();
-      if (RETRY_BACKOFF_MS > 0) {
-        await sleep(RETRY_BACKOFF_MS);
-      }
-    }
-
-    try {
-      const resp = await axios.post(PAYMENT_URL, orderData, { timeout: RETRY_TIMEOUT_MS });
-      return resp.data;
-    } catch (err) {
-      if (attempt >= RETRIES_MAX) {
-        throw err;
-      }
-    }
-  }
-}
+const RETRIES_MAX = 2;
+const RETRY_TIMEOUT_MS = 1000;
+const RETRY_BACKOFF_MS = 500;
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', framework: 'express-node' });
+  res.json({ status: 'ok', service: 'order-service', retries_max: RETRIES_MAX });
 });
 
 app.get('/metrics', async (req, res) => {
-  res.set('Content-Type', register.contentType);
-  res.end(await register.metrics());
+  res.set('Content-Type', client.register.contentType);
+  res.end(await client.register.metrics());
 });
 
-app.post('/api/v1/orders/create', async (req, res) => {
-  const { item_id, quantity } = req.body || {};
-  try {
-    const paymentResp = await callDownstreamWithRetry({
-      order_id: `ord_${Date.now()}`,
-      amount: 49.99
-    });
-    requestCounter.labels('express-order', 'success').inc();
-    res.status(200).json({ status: 'SUCCESS', item_id: item_id || 'default_item', payment: paymentResp });
-  } catch (err) {
-    requestCounter.labels('express-order', 'error').inc();
-    res.status(504).json({ status: 'ERROR', error: err.message });
+app.post('/api/orders', async (req, res) => {
+  httpRequestsTotal.inc({ method: 'POST', route: '/api/orders', status_code: '200' });
+  const { orderId, amount, item } = req.body;
+  const inventoryUrl = process.env.INVENTORY_SERVICE_URL || 'http://inventory-service:8000/inventory/reserve';
+
+  for (let attempt = 0; attempt <= RETRIES_MAX; attempt++) {
+    if (attempt > 0) {
+      retryAttemptsTotal.inc({ service: 'order-service', target: 'inventory-service' });
+      if (RETRY_BACKOFF_MS > 0) {
+        await new Promise(resolve => setTimeout(resolve, RETRY_BACKOFF_MS));
+      }
+    }
+    try {
+      const resp = await axios.post(inventoryUrl, { orderId, amount, item }, { timeout: RETRY_TIMEOUT_MS });
+      return res.json({ status: 'completed', orderId, inventory: resp.data });
+    } catch (err) {
+      if (attempt === RETRIES_MAX) {
+        return res.status(503).json({ error: 'inventory service unavailable after retries', details: err.message });
+      }
+    }
   }
 });
 
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Express Order Service running on port ${PORT}`);
+  console.log(`Order service listening on port ${PORT}`);
 });
-
-
-
-
