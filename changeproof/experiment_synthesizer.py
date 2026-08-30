@@ -95,21 +95,29 @@ class ExperimentSynthesizer:
 
     def resolve_changed_file(self, pr_diff: str, changed_service: str) -> str:
         """Resolves the exact file path modified in the changed service."""
+        s_clean = _clean_service_name(changed_service)
         extracted_paths = []
+        matching_paths = []
         for line in pr_diff.splitlines():
             if line.startswith("--- a/") or line.startswith("+++ b/"):
                 path = line.split("/", 1)[-1].strip()
                 clean_path = re.sub(r"^[ab]/", "", path)
-                if os.path.exists(path):
-                    return path
-                if os.path.exists(clean_path):
-                    return clean_path
-                extracted_paths.append(clean_path)
+                if clean_path.startswith((".github/", "changeproof/", "tests/", "docs/", ".git/")):
+                    continue
+                if f"/{s_clean}/" in f"/{clean_path}" or s_clean in clean_path or changed_service in clean_path:
+                    if os.path.exists(path):
+                        return path
+                    if os.path.exists(clean_path):
+                        return clean_path
+                    matching_paths.append(clean_path)
+                else:
+                    extracted_paths.append(clean_path)
 
+        if matching_paths:
+            return matching_paths[0]
         if extracted_paths:
             return extracted_paths[0]
 
-        s_clean = _clean_service_name(changed_service)
         candidates = [
             f"app/{s_clean}/server.js",
             f"app/{s_clean}/main.py",
@@ -117,13 +125,14 @@ class ExperimentSynthesizer:
             f"app/{changed_service}/server.js",
             f"app/{changed_service}/main.py",
             f"app/{changed_service}/app.py",
+            f"{s_clean}/server.js",
             f"{s_clean}/main.py",
             f"src/{s_clean}/main.py",
         ]
         for c in candidates:
             if os.path.exists(c):
                 return c
-        return f"app/{s_clean}/main.py"
+        return f"app/{s_clean}/server.js"
     def resolve_downstream_dependency(
         self,
         service_name: str,
