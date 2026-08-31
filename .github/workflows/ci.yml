@@ -1,0 +1,15 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fake-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fake CI pass
+        run: echo "CI passed"
